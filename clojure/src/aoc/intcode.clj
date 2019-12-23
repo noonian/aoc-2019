@@ -1,29 +1,13 @@
 (ns aoc.intcode
   (:require [clojure.java.io :as io]
             [clojure.string :as str]
-            [clojure.spec.alpha :as s]
+            [clojure.core.async :as async :refer [go chan]]
             [clojure.pprint :refer [pprint]])
-  (:refer-clojure :exclude [eval]))
+  (:refer-clojure :exclude [eval])
+  (:import (clojure.core.async.impl.channels ManyToManyChannel)))
 
 (defn parse-intcode [s]
   (mapv #(Integer/parseInt %) (str/split (str/trim s) #",")))
-
-(defn instruction [impl arity]
-  {:arity arity
-   :impl impl})
-
-(defn set-input [memory value]
-  (assoc memory 1 value))
-
-(defn set-inputs [memory noun verb]
-  (assoc memory
-    1 noun
-    2 verb))
-
-(defn inputs [memory] (take 2 (drop 1 memory)))
-(defn output [memory] (first memory))
-(defn set-input [memory input] (assoc memory 1 input))
-(defn set-output [memory output] (assoc memory 0 output))
 
 (def position-mode? (partial = 0))
 (def immediate-mode? (partial = 1))
@@ -82,18 +66,43 @@
         (update :ip + 4)
         (assoc-in [:memory result-index] (* a b)))))
 
-(defn output-instr [env]
+(defn output-instr [{:keys [out-c] :as env}]
   (let [[value] (load-params env 1)]
+    (when out-c
+      (async/put! out-c value))
     (-> env
         (update :ip + 2)
         (assoc :output value))))
 
-(defn save-instr [{:keys [ip memory] :as env}]
-  (let [value (Integer/parseInt (read-line))
+(defmulti get-input-value
+  (fn [{:keys [inputs]}]
+    (cond
+      (coll? inputs) :collection
+      (instance? ManyToManyChannel inputs) :channel
+      :else :read-line)))
+
+(defmethod get-input-value :collection [{:keys [inputs] :as env}]
+  [(first inputs) (update env :inputs (partial drop 1))])
+
+(defmethod get-input-value :read-line [env]
+  [(Integer/parseInt (read-line)) env])
+
+(defmethod get-input-value :channel [{:keys [inputs] :as env}]
+  (println "channel method called")
+  [(async/<!! inputs) env])
+
+#_(defn get-input-value [{:keys [inputs]}]
+    #_(println "inputs:" inputs)
+    (or (first inputs) (Integer/parseInt (read-line))))
+
+(defn input-instr [{:keys [ip memory] :as env}]
+  (let [[input-value new-env] (get-input-value env)
+        _ (println "recieved input value:" input-value)
         address (get memory (inc ip))]
-    (-> env
+    (-> new-env
         (update :ip + 2)
-        (update :memory assoc address value))))
+        ;; (update :inputs (partial drop 1))
+        (update :memory assoc address input-value))))
 
 (defn jump-if-true [env]
   (let [[a b] (load-params env 2)]
@@ -124,7 +133,7 @@
 (def operations2
   {1 add-instr
    2 multiply-instr
-   3 save-instr
+   3 input-instr
    4 output-instr
    5 jump-if-true
    6 jump-if-false
@@ -137,25 +146,32 @@
    :operations operations2
    :mutating-ip? true})
 
-(defn print-env [{:keys [memory ip halted? opcode param-modes output]}]
+(defn print-env [{:keys [memory ip halted? opcode param-modes output inputs]}]
   (println
    (format "
 instruction-pointer: %s
 opcode: %s
 param-modes: %s
+inputs: %s
 output: %s
 "
            ip
            opcode
            (str/join ", " param-modes)
+           (str/join "," inputs)
            output)))
 
-(defn process-instruction [{:keys [operations memory ip halted? mutating-ip?] :as initial-env}]
+(defn halt! [{:keys [out-c] :as env}]
+  (when out-c
+    (async/close! out-c))
+  (assoc env :halted? true))
+
+(defn process-instruction [{:keys [operations memory ip halted? mutating-ip? out-c] :as initial-env}]
   (try
     (let [{:keys [opcode] :as env} (merge initial-env (parse-op ip memory))]
       (try
         (if (= 99 opcode)
-          (assoc env :halted? true)
+          (halt! env)
           (if-let [op (get operations opcode)]
             (op (dissoc env :output))
             (throw (Exception. (format "No operation found for opcode %s" opcode)))))
@@ -164,16 +180,20 @@ output: %s
           (pprint env)
           (.printStackTrace e)
           (print-env env)
-          {:halted? true})))
+          (halt! env))))
     (catch Exception e
       (println "caught exception in process-instruction")
-      {:halted? true})))
+      (halt! initial-env))))
 
 (defn program-states [env]
   (into [] (take-while (comp not :halted?) (iterate process-instruction env))))
 
-(defn eval [initial-memory]
-  (last (program-states (environment initial-memory))))
+(defn eval-env [env]
+  (last (program-states env)))
+
+(defn eva
+  ([initial-memory] (eval nil initial-memory))
+  ([opts initial-memory] (eval-env (merge (environment initial-memory) opts))))
 
 (def input (slurp (io/resource "input/day5.txt")))
 (def diagnostic-program (parse-intcode input))
