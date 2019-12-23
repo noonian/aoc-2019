@@ -46,6 +46,23 @@
 (deftest day5-part-2
   (is (= 14340395 (:output (with-in-str "5" (intcode/eval input-memory))))))
 
+(deftest day9-examples
+  (is (= [109 1 204 -1 1001 100 1 100 1008 100 16 101 1006 101 0 99]
+         (->> (intcode/program-states (intcode/environment [109 1 204 -1 1001 100 1 100 1008 100 16 101 1006 101 0 99]))
+              (map :output)
+              (filter identity))))
+  (let [n (:output (intcode/eval (intcode/parse-intcode "1102,34915192,34915192,7,4,7,99,0")))]
+    (is (= 16 (count (str n))))
+    (is (= 1219070632396864 n)))
+  (is (= 1125899906842624
+         (:output (intcode/eval (intcode/parse-intcode "104,1125899906842624,99"))))))
+
+(deftest day9-part-1
+  (is (= 3742852857 (:output (intcode/eval {:inputs [1]} intcode/boost-program)))))
+
+(deftest day9-part-2
+  (is (= 73439 (:output (intcode/eval {:inputs [2]} intcode/boost-program)))))
+
 (comment
 
   (def states

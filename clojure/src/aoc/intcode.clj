@@ -7,64 +7,57 @@
   (:import (clojure.core.async.impl.channels ManyToManyChannel)))
 
 (defn parse-intcode [s]
-  (mapv #(Integer/parseInt %) (str/split (str/trim s) #",")))
+  (mapv #(Long/parseLong %) (str/split (str/trim s) #",")))
 
-(def position-mode? (partial = 0))
-(def immediate-mode? (partial = 1))
+(defn load-param [{:keys [memory relative-base]} value param-mode write?]
+  (condp = (or param-mode 0)
+    0 (if write? value (get memory value 0))   ;position mode
+    1 value                                    ;immediate mode
+    2 (if write? value (get memory (+ relative-base value) 0)))) ;relative mode
 
-(defn load-param [memory value param-mode]
-  (if (immediate-mode? param-mode)
-    value
-    (get memory value)))
+(defn load-write-param [{:keys [ip memory relative-base param-modes]} param-index]
+  (let [param-mode (get param-modes param-index 0)
+        param-val (get memory (+ ip param-index 1))]
+    (cond-> param-val
+      (= 2 param-mode) (+ relative-base))))
 
-(defn load-params [{:keys [ip memory param-modes]} arity]
-  (into []
-    (for [i (range arity)]
-      (load-param memory (get memory (+ ip 1 i)) (get param-modes i 0)))))
+(defn load-params
+  ([env arity] (load-params env arity false))
+  ([{:keys [ip memory param-modes] :as env} arity write?]
+   (into []
+     (for [i (range arity)]
+       (load-param env (get memory (+ ip 1 i)) (get param-modes i 0) write?)))))
 
-(defn parse-op [ip memory #_{:keys [memory ip]}]
+(defn parse-op [ip memory]
   (let [op-val (get memory ip)
-        digits (->> op-val str reverse (map #(Integer/parseInt (str %))))
-        opcode (Integer/parseInt (apply str (reverse (take 2 digits))))
+        digits (->> op-val str reverse (map #(Long/parseLong (str %))))
+        opcode (Long/parseLong (apply str (reverse (take 2 digits))))
         param-modes (into [] (drop 2 digits))]
     {:opcode opcode
      :param-modes param-modes}))
 
-(defn find-op [{:keys [operations memory ip]}]
-  (try
-    (let [op-val (get memory ip)
-          digits (->> op-val str reverse (map #(Integer/parseInt (str %))))
-          opcode (Integer/parseInt (apply str (reverse (take 2 digits))))
-          halt? (= 99 opcode)]
-      (if (= opcode 99)
-        {:opcode 99
-         :halt? true}
-        (let [{:keys [arity impl] :as op} (get operations opcode)
-              _ (println "arity, impl:" arity impl)
-              param-modes (into [] (drop 2 digits))
-              _ (println "param-modes:" param-modes)
-              params (into []
-                       (for [i (range arity)]
-                         (load-param memory (get memory (+ ip 1 i)) (get param-modes i 0))))]
-          (merge {:params params
-                  :opcode opcode}
-                 op))))
-    (catch Exception e
-      (println "caught exception in find-op"))))
+(defn grow-memory [memory index]
+  (into memory (map (constantly 0) (range (- (inc index) (count memory))))))
 
-(defn add-instr [{:keys [ip memory param-modes] :as env}]
+(defn write-memory [{:keys [memory] :as env} index value]
+  (let [new-memory (assoc (cond-> memory
+                            (not (contains? memory index)) (grow-memory index))
+                     index value)]
+    (assoc env :memory new-memory)))
+
+(defn add-instr [{:keys [ip memory] :as env}]
   (let [[a b] (load-params env 2)
-        result-index (get memory (+ ip 3))]
+        result-index (load-write-param env 2)]
     (-> env
         (update :ip + 4)
-        (assoc-in [:memory result-index] (+ a b)))))
+        (write-memory result-index (+ a b)))))
 
-(defn multiply-instr [{:keys [ip memory param-modes] :as env}]
+(defn multiply-instr [{:keys [ip memory] :as env}]
   (let [[a b] (load-params env 2)
-        result-index (get memory (+ ip 3))]
+        result-index (load-write-param env 2)]
     (-> env
         (update :ip + 4)
-        (assoc-in [:memory result-index] (* a b)))))
+        (write-memory result-index (* a b)))))
 
 (defn output-instr [{:keys [out-c] :as env}]
   (let [[value] (load-params env 1)]
@@ -85,24 +78,18 @@
   [(first inputs) (update env :inputs (partial drop 1))])
 
 (defmethod get-input-value :read-line [env]
-  [(Integer/parseInt (read-line)) env])
+  [(Long/parseLong (read-line)) env])
 
 (defmethod get-input-value :channel [{:keys [inputs] :as env}]
   (println "channel method called")
   [(async/<!! inputs) env])
 
-#_(defn get-input-value [{:keys [inputs]}]
-    #_(println "inputs:" inputs)
-    (or (first inputs) (Integer/parseInt (read-line))))
-
-(defn input-instr [{:keys [ip memory] :as env}]
+(defn input-instr [{:keys [ip memory opcode param-modes relative-base] :as env}]
   (let [[input-value new-env] (get-input-value env)
-        _ (println "recieved input value:" input-value)
-        address (get memory (inc ip))]
+        address (load-write-param env 0)]
     (-> new-env
         (update :ip + 2)
-        ;; (update :inputs (partial drop 1))
-        (update :memory assoc address input-value))))
+        (write-memory address input-value))))
 
 (defn jump-if-true [env]
   (let [[a b] (load-params env 2)]
@@ -118,19 +105,25 @@
 
 (defn less-than [{:keys [ip memory] :as env}]
   (let [[a b] (load-params env 2)
-        result-index (get memory (+ ip 3))]
+        result-index (load-write-param env 2)]
     (-> env
-        (assoc-in [:memory result-index] (if (< a b) 1 0))
+        (write-memory result-index (if (< a b) 1 0))
         (update :ip + 4))))
 
 (defn equals [{:keys [ip memory] :as env}]
   (let [[a b] (load-params env 2)
-        result-index (get memory (+ ip 3))]
+        result-index (load-write-param env 2)]
     (-> env
-        (assoc-in [:memory result-index] (if (= a b) 1 0))
+        (write-memory result-index (if (= a b) 1 0))
         (update :ip + 4))))
 
-(def operations2
+(defn adjust-relative-base [env]
+  (let [[amount] (load-params env 1)]
+    (-> env
+        (update :relative-base + amount)
+        (update :ip + 2))))
+
+(def operations
   {1 add-instr
    2 multiply-instr
    3 input-instr
@@ -138,13 +131,14 @@
    5 jump-if-true
    6 jump-if-false
    7 less-than
-   8 equals})
+   8 equals
+   9 adjust-relative-base})
 
 (defn environment [initial-memory]
   {:memory initial-memory
    :ip 0
-   :operations operations2
-   :mutating-ip? true})
+   :relative-base 0
+   :operations operations})
 
 (defn print-env [{:keys [memory ip halted? opcode param-modes output inputs]}]
   (println
@@ -166,7 +160,7 @@ output: %s
     (async/close! out-c))
   (assoc env :halted? true))
 
-(defn process-instruction [{:keys [operations memory ip halted? mutating-ip? out-c] :as initial-env}]
+(defn process-instruction [{:keys [operations memory ip halted? out-c] :as initial-env}]
   (try
     (let [{:keys [opcode] :as env} (merge initial-env (parse-op ip memory))]
       (try
@@ -191,7 +185,7 @@ output: %s
 (defn eval-env [env]
   (last (program-states env)))
 
-(defn eva
+(defn eval
   ([initial-memory] (eval nil initial-memory))
   ([opts initial-memory] (eval-env (merge (environment initial-memory) opts))))
 
@@ -207,8 +201,12 @@ output: %s
                        ip output)))
     (println "Diagnostic program output code:" (:output (last states)))))
 
+(def boost-program (parse-intcode (slurp (io/resource "input/day9.txt"))))
+
 (comment
 
   (run-diagnostic)
+
+  (map :output (program-states (assoc (environment boost-program) :inputs [1])))
 
   )
