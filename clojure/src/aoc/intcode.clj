@@ -9,11 +9,11 @@
 (defn parse-intcode [s]
   (mapv #(Long/parseLong %) (str/split (str/trim s) #",")))
 
-(defn load-param [{:keys [memory relative-base]} value param-mode write?]
+(defn load-param [{:keys [memory relative-base]} value param-mode]
   (condp = (or param-mode 0)
-    0 (if write? value (get memory value 0))   ;position mode
+    0 (get memory value 0)                     ;position mode
     1 value                                    ;immediate mode
-    2 (if write? value (get memory (+ relative-base value) 0)))) ;relative mode
+    2 (get memory (+ relative-base value) 0))) ;relative mode
 
 (defn load-write-param [{:keys [ip memory relative-base param-modes]} param-index]
   (let [param-mode (get param-modes param-index 0)
@@ -22,11 +22,10 @@
       (= 2 param-mode) (+ relative-base))))
 
 (defn load-params
-  ([env arity] (load-params env arity false))
-  ([{:keys [ip memory param-modes] :as env} arity write?]
-   (into []
-     (for [i (range arity)]
-       (load-param env (get memory (+ ip 1 i)) (get param-modes i 0) write?)))))
+  [{:keys [ip memory param-modes] :as env} arity]
+  (into []
+    (for [i (range arity)]
+      (load-param env (get memory (+ ip 1 i)) (get param-modes i 0)))))
 
 (defn parse-op [ip memory]
   (let [op-val (get memory ip)
@@ -80,8 +79,8 @@
 (defmethod get-input-value :read-line [env]
   [(Long/parseLong (read-line)) env])
 
-(defmethod get-input-value :channel [{:keys [inputs] :as env}]
-  (println "channel method called")
+(defmethod get-input-value :channel [{:keys [inputs input-requests] :as env}]
+  (async/put! input-requests :request-input)
   [(async/<!! inputs) env])
 
 (defn input-instr [{:keys [ip memory opcode param-modes relative-base] :as env}]
@@ -138,7 +137,8 @@
   {:memory initial-memory
    :ip 0
    :relative-base 0
-   :operations operations})
+   :operations operations
+   :input-requests (async/chan)})
 
 (defn print-env [{:keys [memory ip halted? opcode param-modes output inputs]}]
   (println
